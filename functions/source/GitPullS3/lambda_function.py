@@ -6,6 +6,7 @@
 #  See the License for the specific language governing permissions and limitations under the License.
 
 from pygit2 import Keypair, discover_repository, Repository, clone_repository, RemoteCallbacks
+import boto3
 from boto3 import client
 import os
 import stat
@@ -33,7 +34,6 @@ logging.getLogger('botocore').setLevel(logging.ERROR)
 
 s3 = client('s3')
 kms = client('kms')
-
 
 def write_key(filename, contents):
     logger.info('Writing keys to /tmp/...')
@@ -92,31 +92,17 @@ def pull_repo(repo, branch_name, remote_url, creds):
     repo.head.set_target(remote_branch_id)
     return repo
 
+def upload_files(path, outputbucket):
+    count = 0
+    for subdir, dirs, files in os.walk(path):
+        for file in files:
+            full_path = os.path.join(subdir, file)
+            with open(full_path, 'rb') as data:
+                s3.put_object(Bucket=outputbucket, Key=full_path[len(path)+1:], Body=data)
+                logger.info('Uploaded: %s' % (full_path))
+                count += 1
 
-def zip_repo(repo_path, repo_name):
-    logger.info('Creating zipfile...')
-    zf = ZipFile('/tmp/'+repo_name.replace('/', '_')+'.zip', 'w')
-    for dirname, subdirs, files in os.walk(repo_path):
-        if exclude_git:
-            try:
-                subdirs.remove('.git')
-            except ValueError:
-                pass
-        zdirname = dirname[len(repo_path)+1:]
-        zf.write(dirname, zdirname)
-        for filename in files:
-            zf.write(os.path.join(dirname, filename), os.path.join(zdirname, filename))
-    zf.close()
-    return '/tmp/'+repo_name.replace('/', '_')+'.zip'
-
-
-def push_s3(filename, repo_name, outputbucket):
-    s3key = '%s/%s' % (repo_name, filename.replace('/tmp/', ''))
-    logger.info('pushing zip to s3://%s/%s' % (outputbucket, s3key))
-    data = open(filename, 'rb')
-    s3.put_object(Bucket=outputbucket, Body=data, Key=s3key)
-    logger.info('Completed S3 upload...')
-
+    logger.info('Completed %s uploads to S3...' % count)
 
 def lambda_handler(event, context):
     keybucket = event['context']['key-bucket']
@@ -187,11 +173,9 @@ def lambda_handler(event, context):
         repo = Repository(repository_path)
         logger.info('found existing repo, using that...')
     except Exception:
-        logger.info('creating new repo for %s in %s' % (remote_url, repo_path))
         repo = create_repo(repo_path, remote_url, creds)
     pull_repo(repo, branch_name, remote_url, creds)
-    zipfile = zip_repo(repo_path, repo_name)
-    push_s3(zipfile, repo_name, outputbucket)
+    upload_files(repo_path, outputbucket)
     if cleanup:
         logger.info('Cleanup Lambda container...')
         shutil.rmtree(repo_path)
